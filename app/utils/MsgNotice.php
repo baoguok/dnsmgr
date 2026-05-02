@@ -61,6 +61,9 @@ class MsgNotice
             $content = str_replace(['<br/>', '<b>', '</b>'], ["\n", '**', '**'], $mail_content);
             self::send_webhook($mail_title, $content);
         }
+        if (config_get('notice_custom_webhook') == 1) {
+            self::send_custom_webhook($mail_title, $mail_content);
+        }
     }
 
     public static function cert_order_send($id, $result)
@@ -141,6 +144,9 @@ class MsgNotice
             $content = str_replace(['*', '<br/>', '<b>', '</b>'], ['\*', "\n", '**', '**'], $mail_content);
             self::send_webhook($mail_title, $content);
         }
+        if (config_get('cert_notice_custom_webhook') == 1 || config_get('cert_notice_custom_webhook') == 2 && !$result) {
+            self::send_custom_webhook($mail_title, $mail_content);
+        }
     }
 
     public static function expire_notice_send($day, $list)
@@ -168,6 +174,9 @@ class MsgNotice
         if (config_get('expire_notice_webhook') == 1) {
             $content = str_replace(['*', '<br/>', '<b>', '</b>'], ['\*', "\n", '**', '**'], $mail_content);
             self::send_webhook($mail_title, $content);
+        }
+        if (config_get('expire_notice_custom_webhook') == 1) {
+            self::send_custom_webhook($mail_title, $mail_content);
         }
     }
 
@@ -223,6 +232,7 @@ class MsgNotice
         $url = 'https://wxpusher.zjiecode.com/api/send/message';
         $post = ['appToken' => $wechat_apptoken, 'content' => $content, 'summary' => $title, 'contentType' => 3, 'uids' => [$wechat_appuid]];
         $result = get_curl($url, json_encode($post), 0, 0, 0, 0, ['Content-Type' => 'application/json; charset=UTF-8']);
+        if (!$result) return '请求失败';
         $arr = json_decode($result, true);
         if (isset($arr['success']) && $arr['success'] == true) {
             return true;
@@ -246,6 +256,7 @@ class MsgNotice
         $url = $tgbot_url.'/bot'.$tgbot_token.'/sendMessage';
         $post = ['chat_id' => $tgbot_chatid, 'text' => $content, 'parse_mode' => 'HTML'];
         $result = self::telegram_curl($url, http_build_query($post));
+        if (!$result) return '请求失败';
         $arr = json_decode($result, true);
         if (isset($arr['ok']) && $arr['ok'] == true) {
             return true;
@@ -348,11 +359,91 @@ class MsgNotice
             return '不支持的Webhook地址';
         }
         $result = get_curl($url, json_encode($post), 0, 0, 0, 0, ['Content-Type' => 'application/json; charset=UTF-8']);
+        if (!$result) return '请求失败';
         $arr = json_decode($result, true);
         if (isset($arr['errcode']) && $arr['errcode'] == 0 || isset($arr['code']) && $arr['code'] == 0) {
             return true;
         } else {
             return $arr['errmsg'] ?? (isset($arr['msg']) ? $arr['msg'] : '请求失败');
+        }
+    }
+
+    public static function send_custom_webhook($title, $content)
+    {
+        $url = config_get('custom_webhook_url');
+        if (!$url || !parse_url($url)) return false;
+
+        $method = strtoupper(config_get('custom_webhook_method') ?: 'POST');
+        $contentType = config_get('custom_webhook_content_type') ?: 'application/json';
+        $headersRaw = config_get('custom_webhook_headers');
+        $bodyTemplate = config_get('custom_webhook_body') ?: '{"title":"{title}","content":"{content}"}';
+        $contentFormat = config_get('custom_webhook_content_format') ?: 'text';
+
+        if ($contentFormat === 'markdown') {
+            $content = str_replace(['<br/>', '<b>', '</b>'], ["\n", '**', '**'], $content);
+            $content = strip_tags($content);
+        } elseif ($contentFormat === 'text') {
+            $content = str_replace('<br/>', "\n", $content);
+            $content = strip_tags($content);
+        }
+
+        $body = str_replace(['{title}', '{content}'], [$title, $content], $bodyTemplate);
+
+        $headers = [];
+        if (!empty($headersRaw)) {
+            $lines = explode("\n", $headersRaw);
+            foreach ($lines as $line) {
+                $line = trim($line);
+                if (empty($line)) continue;
+                $pos = strpos($line, ':');
+                if ($pos !== false) {
+                    $key = trim(substr($line, 0, $pos));
+                    $val = trim(substr($line, $pos + 1));
+                    if ($key !== '') $headers[$key] = $val;
+                }
+            }
+        }
+
+        $options = [
+            'timeout' => 10,
+            'verify' => false,
+            'headers' => $headers,
+            'http_errors' => false,
+        ];
+
+        if ($method === 'GET') {
+            $params = [];
+            if ($contentType === 'application/json') {
+                $decoded = json_decode($body, true);
+                if (is_array($decoded)) {
+                    $params = $decoded;
+                }
+            } else {
+                parse_str($body, $params);
+            }
+            $connector = strpos($url, '?') !== false ? '&' : '?';
+            $url = $url . $connector . http_build_query($params);
+        } else {
+            $options['headers']['Content-Type'] = $contentType;
+            if ($contentType === 'application/json') {
+                json_decode($body);
+                if (json_last_error() !== JSON_ERROR_NONE) {
+                    $body = json_encode(['title' => $title, 'content' => $content]);
+                }
+            }
+            $options['body'] = $body;
+        }
+
+        try {
+            $client = new \GuzzleHttp\Client();
+            $response = $client->request($method, $url, $options);
+            $statusCode = $response->getStatusCode();
+            if ($statusCode >= 200 && $statusCode < 300) {
+                return true;
+            }
+            return '请求失败，HTTP状态码：' . $statusCode;
+        } catch (\Exception $e) {
+            return '请求失败：' . $e->getMessage();
         }
     }
 
